@@ -438,86 +438,77 @@ export async function postToWeChat(options: WeChatBrowserOptions): Promise<void>
     await sleep(500);
 
     console.log('[wechat-browser] Filling content...');
-    // Try ProseMirror editor first (new WeChat UI), then fallback to old editor
-    const contentResult = await cdp.send<{ result: { value: string } }>('Runtime.evaluate', {
+    // Detect editor type
+    const editorDetect = await cdp.send<{ result: { value: string } }>('Runtime.evaluate', {
       expression: `
         (function() {
-          const contentHtml = ${JSON.stringify('<p>' + content.split('\n').filter(l => l.trim()).join('</p><p>') + '</p>')};
-
-          // New UI: ProseMirror contenteditable
           const pm = document.querySelector('.ProseMirror[contenteditable=true]');
           if (pm) {
-            pm.innerHTML = contentHtml;
-            pm.dispatchEvent(new Event('input', { bubbles: true }));
-            return 'ProseMirror: content set, length=' + pm.textContent.length;
+            pm.scrollIntoView({ block: 'center' });
+            const rect = pm.getBoundingClientRect();
+            return JSON.stringify({ type: 'prosemirror', x: rect.x + 50, y: rect.y + 20 });
           }
-
-          // Old UI: .js_pmEditorArea
           const oldEditor = document.querySelector('.js_pmEditorArea');
           if (oldEditor) {
-            return JSON.stringify({ type: 'old', x: oldEditor.getBoundingClientRect().x + 50, y: oldEditor.getBoundingClientRect().y + 20 });
+            const rect = oldEditor.getBoundingClientRect();
+            return JSON.stringify({ type: 'old', x: rect.x + 50, y: rect.y + 20 });
           }
-
           return 'editor_not_found';
         })()
       `,
       returnByValue: true,
     }, { sessionId });
 
-    const contentStatus = contentResult.result.value;
-    console.log(`[wechat-browser] Content result: ${contentStatus}`);
+    const editorStatus = editorDetect.result.value;
+    console.log(`[wechat-browser] Editor detect: ${editorStatus}`);
 
-    if (contentStatus === 'editor_not_found') {
+    if (editorStatus === 'editor_not_found') {
       throw new Error('Content editor not found');
     }
 
-    // Fallback: old editor uses keyboard simulation
-    if (contentStatus.startsWith('{')) {
-      const editorClickPos = JSON.parse(contentStatus);
-      if (editorClickPos.type === 'old') {
-        console.log('[wechat-browser] Using old editor with keyboard simulation...');
-        await cdp.send('Input.dispatchMouseEvent', {
-          type: 'mousePressed',
-          x: editorClickPos.x,
-          y: editorClickPos.y,
-          button: 'left',
-          clickCount: 1,
-        }, { sessionId });
-        await sleep(50);
-        await cdp.send('Input.dispatchMouseEvent', {
-          type: 'mouseReleased',
-          x: editorClickPos.x,
-          y: editorClickPos.y,
-          button: 'left',
-          clickCount: 1,
-        }, { sessionId });
-        await sleep(300);
+    // Click editor to focus, then use keyboard simulation for both editor types
+    const editorPos = JSON.parse(editorStatus);
+    console.log(`[wechat-browser] Using ${editorPos.type} editor with keyboard simulation...`);
+    await cdp.send('Input.dispatchMouseEvent', {
+      type: 'mousePressed',
+      x: editorPos.x,
+      y: editorPos.y,
+      button: 'left',
+      clickCount: 1,
+    }, { sessionId });
+    await sleep(50);
+    await cdp.send('Input.dispatchMouseEvent', {
+      type: 'mouseReleased',
+      x: editorPos.x,
+      y: editorPos.y,
+      button: 'left',
+      clickCount: 1,
+    }, { sessionId });
+    await sleep(300);
 
-        const lines = content.split('\n');
-        for (let i = 0; i < lines.length; i++) {
-          const line = lines[i];
-          if (line!.length > 0) {
-            await cdp.send('Input.insertText', { text: line }, { sessionId });
-          }
-          if (i < lines.length - 1) {
-            await cdp.send('Input.dispatchKeyEvent', {
-              type: 'keyDown',
-              key: 'Enter',
-              code: 'Enter',
-              windowsVirtualKeyCode: 13,
-            }, { sessionId });
-            await cdp.send('Input.dispatchKeyEvent', {
-              type: 'keyUp',
-              key: 'Enter',
-              code: 'Enter',
-              windowsVirtualKeyCode: 13,
-            }, { sessionId });
-          }
-          await sleep(50);
-        }
-        console.log('[wechat-browser] Content typed via keyboard.');
+    const lines = content.split('\n');
+    for (let i = 0; i < lines.length; i++) {
+      const line = lines[i]!;
+      if (line.length > 0) {
+        await cdp.send('Input.insertText', { text: line }, { sessionId });
       }
+      if (i < lines.length - 1) {
+        await cdp.send('Input.dispatchKeyEvent', {
+          type: 'keyDown',
+          key: 'Enter',
+          code: 'Enter',
+          windowsVirtualKeyCode: 13,
+        }, { sessionId });
+        await cdp.send('Input.dispatchKeyEvent', {
+          type: 'keyUp',
+          key: 'Enter',
+          code: 'Enter',
+          windowsVirtualKeyCode: 13,
+        }, { sessionId });
+      }
+      await sleep(30);
     }
+    console.log(`[wechat-browser] Content typed: ${lines.length} lines`);
     await sleep(500);
 
     if (submit) {
