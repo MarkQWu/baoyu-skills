@@ -1,10 +1,9 @@
-import { spawn } from 'node:child_process';
 import fs from 'node:fs';
-import { mkdir, readdir } from 'node:fs/promises';
-import net from 'node:net';
-import os from 'node:os';
+import { readdir } from 'node:fs/promises';
 import path from 'node:path';
 import process from 'node:process';
+
+import { CdpConnection, launchChrome, tryConnectExisting, sleep, getDefaultProfileDir } from './cdp.ts';
 
 const WECHAT_URL = 'https://mp.weixin.qq.com/';
 
@@ -104,176 +103,6 @@ async function loadImagesFromDir(dir: string): Promise<string[]> {
   return images;
 }
 
-function sleep(ms: number): Promise<void> {
-  return new Promise((resolve) => setTimeout(resolve, ms));
-}
-
-async function getFreePort(): Promise<number> {
-  return new Promise((resolve, reject) => {
-    const server = net.createServer();
-    server.unref();
-    server.on('error', reject);
-    server.listen(0, '127.0.0.1', () => {
-      const address = server.address();
-      if (!address || typeof address === 'string') {
-        server.close(() => reject(new Error('Unable to allocate a free TCP port.')));
-        return;
-      }
-      const port = address.port;
-      server.close((err) => {
-        if (err) reject(err);
-        else resolve(port);
-      });
-    });
-  });
-}
-
-function findChromeExecutable(): string | undefined {
-  const override = process.env.WECHAT_BROWSER_CHROME_PATH?.trim();
-  if (override && fs.existsSync(override)) return override;
-
-  const candidates: string[] = [];
-  switch (process.platform) {
-    case 'darwin':
-      candidates.push(
-        '/Applications/Google Chrome.app/Contents/MacOS/Google Chrome',
-        '/Applications/Google Chrome Canary.app/Contents/MacOS/Google Chrome Canary',
-        '/Applications/Google Chrome Beta.app/Contents/MacOS/Google Chrome Beta',
-        '/Applications/Chromium.app/Contents/MacOS/Chromium',
-        '/Applications/Microsoft Edge.app/Contents/MacOS/Microsoft Edge',
-      );
-      break;
-    case 'win32':
-      candidates.push(
-        'C:\\Program Files\\Google\\Chrome\\Application\\chrome.exe',
-        'C:\\Program Files (x86)\\Google\\Chrome\\Application\\chrome.exe',
-        'C:\\Program Files\\Microsoft\\Edge\\Application\\msedge.exe',
-        'C:\\Program Files (x86)\\Microsoft\\Edge\\Application\\msedge.exe',
-      );
-      break;
-    default:
-      candidates.push(
-        '/usr/bin/google-chrome',
-        '/usr/bin/google-chrome-stable',
-        '/usr/bin/chromium',
-        '/usr/bin/chromium-browser',
-        '/snap/bin/chromium',
-        '/usr/bin/microsoft-edge',
-      );
-      break;
-  }
-
-  for (const p of candidates) {
-    if (fs.existsSync(p)) return p;
-  }
-  return undefined;
-}
-
-function getDefaultProfileDir(): string {
-  const base = process.env.XDG_DATA_HOME || path.join(os.homedir(), '.local', 'share');
-  return path.join(base, 'wechat-browser-profile');
-}
-
-async function fetchJson<T = unknown>(url: string): Promise<T> {
-  const res = await fetch(url, { redirect: 'follow' });
-  if (!res.ok) throw new Error(`Request failed: ${res.status} ${res.statusText}`);
-  return (await res.json()) as T;
-}
-
-async function waitForChromeDebugPort(port: number, timeoutMs: number): Promise<string> {
-  const start = Date.now();
-  let lastError: unknown = null;
-
-  while (Date.now() - start < timeoutMs) {
-    try {
-      const version = await fetchJson<{ webSocketDebuggerUrl?: string }>(`http://127.0.0.1:${port}/json/version`);
-      if (version.webSocketDebuggerUrl) return version.webSocketDebuggerUrl;
-      lastError = new Error('Missing webSocketDebuggerUrl');
-    } catch (error) {
-      lastError = error;
-    }
-    await sleep(200);
-  }
-
-  throw new Error(`Chrome debug port not ready: ${lastError instanceof Error ? lastError.message : String(lastError)}`);
-}
-
-class CdpConnection {
-  private ws: WebSocket;
-  private nextId = 0;
-  private pending = new Map<number, { resolve: (v: unknown) => void; reject: (e: Error) => void; timer: ReturnType<typeof setTimeout> | null }>();
-  private eventHandlers = new Map<string, Set<(params: unknown) => void>>();
-
-  private constructor(ws: WebSocket) {
-    this.ws = ws;
-    this.ws.addEventListener('message', (event) => {
-      try {
-        const data = typeof event.data === 'string' ? event.data : new TextDecoder().decode(event.data as ArrayBuffer);
-        const msg = JSON.parse(data) as { id?: number; method?: string; params?: unknown; result?: unknown; error?: { message?: string } };
-
-        if (msg.method) {
-          const handlers = this.eventHandlers.get(msg.method);
-          if (handlers) handlers.forEach((h) => h(msg.params));
-        }
-
-        if (msg.id) {
-          const pending = this.pending.get(msg.id);
-          if (pending) {
-            this.pending.delete(msg.id);
-            if (pending.timer) clearTimeout(pending.timer);
-            if (msg.error?.message) pending.reject(new Error(msg.error.message));
-            else pending.resolve(msg.result);
-          }
-        }
-      } catch {}
-    });
-
-    this.ws.addEventListener('close', () => {
-      for (const [id, pending] of this.pending.entries()) {
-        this.pending.delete(id);
-        if (pending.timer) clearTimeout(pending.timer);
-        pending.reject(new Error('CDP connection closed.'));
-      }
-    });
-  }
-
-  static async connect(url: string, timeoutMs: number): Promise<CdpConnection> {
-    const ws = new WebSocket(url);
-    await new Promise<void>((resolve, reject) => {
-      const timer = setTimeout(() => reject(new Error('CDP connection timeout.')), timeoutMs);
-      ws.addEventListener('open', () => { clearTimeout(timer); resolve(); });
-      ws.addEventListener('error', () => { clearTimeout(timer); reject(new Error('CDP connection failed.')); });
-    });
-    return new CdpConnection(ws);
-  }
-
-  on(method: string, handler: (params: unknown) => void): void {
-    if (!this.eventHandlers.has(method)) this.eventHandlers.set(method, new Set());
-    this.eventHandlers.get(method)!.add(handler);
-  }
-
-  async send<T = unknown>(method: string, params?: Record<string, unknown>, options?: { sessionId?: string; timeoutMs?: number }): Promise<T> {
-    const id = ++this.nextId;
-    const message: Record<string, unknown> = { id, method };
-    if (params) message.params = params;
-    if (options?.sessionId) message.sessionId = options.sessionId;
-
-    const timeoutMs = options?.timeoutMs ?? 15_000;
-
-    const result = await new Promise<unknown>((resolve, reject) => {
-      const timer = timeoutMs > 0 ? setTimeout(() => { this.pending.delete(id); reject(new Error(`CDP timeout: ${method}`)); }, timeoutMs) : null;
-      this.pending.set(id, { resolve, reject, timer });
-      this.ws.send(JSON.stringify(message));
-    });
-
-    return result as T;
-  }
-
-  close(): void {
-    try { this.ws.close(); } catch {}
-  }
-}
-
 interface WeChatBrowserOptions {
   title?: string;
   content?: string;
@@ -283,7 +112,6 @@ interface WeChatBrowserOptions {
   submit?: boolean;
   timeoutMs?: number;
   profileDir?: string;
-  chromePath?: string;
 }
 
 export async function postToWeChat(options: WeChatBrowserOptions): Promise<void> {
@@ -329,30 +157,19 @@ export async function postToWeChat(options: WeChatBrowserOptions): Promise<void>
     if (!fs.existsSync(img)) throw new Error(`Image not found: ${img}`);
   }
 
-  const chromePath = options.chromePath ?? findChromeExecutable();
-  if (!chromePath) throw new Error('Chrome not found. Set WECHAT_BROWSER_CHROME_PATH env var.');
-
-  await mkdir(profileDir, { recursive: true });
-
-  const port = await getFreePort();
-  console.log(`[wechat-browser] Launching Chrome (profile: ${profileDir})`);
-
-  const chrome = spawn(chromePath, [
-    `--remote-debugging-port=${port}`,
-    `--user-data-dir=${profileDir}`,
-    '--no-first-run',
-    '--no-default-browser-check',
-    '--disable-blink-features=AutomationControlled',
-    '--start-maximized',
-    WECHAT_URL,
-  ], { stdio: 'ignore' });
-
-  let cdp: CdpConnection | null = null;
+  const port = 9222;
+  let cdp: CdpConnection;
+  const existing = await tryConnectExisting(port);
+  if (existing) {
+    cdp = existing;
+    console.log('[wechat-browser] Connected to existing Chrome instance');
+  } else {
+    const launched = await launchChrome(WECHAT_URL, profileDir);
+    cdp = launched.cdp;
+    console.log('[wechat-browser] Launched new Chrome instance');
+  }
 
   try {
-    const wsUrl = await waitForChromeDebugPort(port, 30_000);
-    cdp = await CdpConnection.connect(wsUrl, 30_000);
-
     const targets = await cdp.send<{ targetInfos: Array<{ targetId: string; url: string; type: string }> }>('Target.getTargets');
     let pageTarget = targets.targetInfos.find((t) => t.type === 'page' && t.url.includes('mp.weixin.qq.com'));
 
@@ -371,7 +188,7 @@ export async function postToWeChat(options: WeChatBrowserOptions): Promise<void>
     await sleep(3000);
 
     const checkLoginStatus = async (): Promise<boolean> => {
-      const result = await cdp!.send<{ result: { value: string } }>('Runtime.evaluate', {
+      const result = await cdp.send<{ result: { value: string } }>('Runtime.evaluate', {
         expression: `window.location.href`,
         returnByValue: true,
       }, { sessionId });
@@ -410,7 +227,7 @@ export async function postToWeChat(options: WeChatBrowserOptions): Promise<void>
     console.log(`[wechat-browser] Menu items: ${menuResult.result.value}`);
 
     const getTargets = async () => {
-      return await cdp!.send<{ targetInfos: Array<{ targetId: string; url: string; type: string }> }>('Target.getTargets');
+      return await cdp.send<{ targetInfos: Array<{ targetId: string; url: string; type: string }> }>('Target.getTargets');
     };
 
     const initialTargets = await getTargets();
@@ -487,7 +304,7 @@ export async function postToWeChat(options: WeChatBrowserOptions): Promise<void>
           return { targetId: editorTab.targetId, isNewTab: !initialIds.has(editorTab.targetId) };
         }
 
-        const currentUrl = await cdp!.send<{ result: { value: string } }>('Runtime.evaluate', {
+        const currentUrl = await cdp.send<{ result: { value: string } }>('Runtime.evaluate', {
           expression: `window.location.href`,
           returnByValue: true,
         }, { sessionId });
@@ -532,24 +349,38 @@ export async function postToWeChat(options: WeChatBrowserOptions): Promise<void>
     const absolutePaths = images.map(p => path.isAbsolute(p) ? p : path.resolve(process.cwd(), p));
     console.log(`[wechat-browser] Images: ${absolutePaths.join(', ')}`);
 
-    const { root } = await cdp.send<{ root: { nodeId: number } }>('DOM.getDocument', {}, { sessionId });
-
-    // Try primary selector, then fallback to any multi-file image input
-    let { nodeId } = await cdp.send<{ nodeId: number }>('DOM.querySelector', {
-      nodeId: root.nodeId,
-      selector: '.js_upload_btn_container input[type=file]',
-    }, { sessionId });
-
-    if (!nodeId) {
-      console.log('[wechat-browser] Primary file input not found, trying fallback selector...');
-      const fallback = await cdp.send<{ nodeId: number }>('DOM.querySelector', {
+    // Wait for the upload area file input (js_upload_btn_container takes ~5-8s to render)
+    await sleep(3000);
+    const primarySelector = '.js_upload_btn_container input[type=file]';
+    const fallbackSelector = '.weui-desktop-upload input[type=file]';
+    let nodeId = 0;
+    for (let attempt = 0; attempt < 5; attempt++) {
+      const { root } = await cdp.send<{ root: { nodeId: number } }>('DOM.getDocument', {}, { sessionId });
+      const primary = await cdp.send<{ nodeId: number }>('DOM.querySelector', {
         nodeId: root.nodeId,
-        selector: 'input[type=file][multiple][accept*="image"]',
+        selector: primarySelector,
       }, { sessionId });
-      nodeId = fallback.nodeId;
+      if (primary.nodeId) {
+        nodeId = primary.nodeId;
+        console.log(`[wechat-browser] File input found: ${primarySelector} (attempt ${attempt + 1})`);
+        break;
+      }
+      if (attempt === 4) {
+        const fallback = await cdp.send<{ nodeId: number }>('DOM.querySelector', {
+          nodeId: root.nodeId,
+          selector: fallbackSelector,
+        }, { sessionId });
+        if (fallback.nodeId) {
+          nodeId = fallback.nodeId;
+          console.log(`[wechat-browser] File input found via fallback: ${fallbackSelector}`);
+          break;
+        }
+      }
+      console.log(`[wechat-browser] Upload area not ready, retrying... (${attempt + 1}/5)`);
+      await sleep(2000);
     }
 
-    if (!nodeId) throw new Error('File input not found');
+    if (!nodeId) throw new Error('File input not found after 13s');
 
     await cdp.send('DOM.setFileInputFiles', {
       nodeId,
@@ -559,26 +390,37 @@ export async function postToWeChat(options: WeChatBrowserOptions): Promise<void>
     // Dispatch change event to trigger the upload
     await cdp.send('Runtime.evaluate', {
       expression: `
-        const fileInput = document.querySelector('.js_upload_btn_container input[type=file]') || document.querySelector('input[type=file][multiple][accept*="image"]');
-        if (fileInput) fileInput.dispatchEvent(new Event('change', { bubbles: true }));
+        const selectors = ['.js_upload_btn_container input[type=file]', 'input[type=file][multiple][accept*="image"]'];
+        for (const s of selectors) {
+          const el = document.querySelector(s);
+          if (el) { el.dispatchEvent(new Event('change', { bubbles: true })); break; }
+        }
       `,
     }, { sessionId });
 
-    // Wait for images to upload
+    // Wait for images to upload (fixed wait + best-effort progress detection)
     console.log('[wechat-browser] Waiting for images to upload...');
     const targetCount = absolutePaths.length;
-    for (let i = 0; i < 30; i++) {
+    const uploadWaitSec = Math.max(10, targetCount * 5);
+    console.log(`[wechat-browser] Waiting ${uploadWaitSec}s for ${targetCount} image(s)...`);
+    for (let i = 0; i < uploadWaitSec / 2; i++) {
       await sleep(2000);
-      const uploadCheck = await cdp.send<{ result: { value: string } }>('Runtime.evaluate', {
-        expression: `
-          const thumbs = document.querySelectorAll('.weui-desktop-upload__thumb, .pic_item, [class*=upload_thumb]');
-          JSON.stringify({ uploaded: thumbs.length });
-        `,
-        returnByValue: true,
-      }, { sessionId });
-      const status = JSON.parse(uploadCheck.result.value);
-      console.log(`[wechat-browser] Upload progress: ${status.uploaded}/${targetCount}`);
-      if (status.uploaded >= targetCount) break;
+      try {
+        const uploadCheck = await cdp.send<{ result: { value: string } }>('Runtime.evaluate', {
+          expression: `
+            const thumbs = document.querySelectorAll('.weui-desktop-upload__thumb, .pic_item, [class*=upload_thumb], .image_card, .image-list img, [class*=pic_item], [class*=image_item]');
+            JSON.stringify({ uploaded: thumbs.length });
+          `,
+          returnByValue: true,
+        }, { sessionId });
+        if (uploadCheck?.result?.value && uploadCheck.result.value !== 'undefined') {
+          const status = JSON.parse(uploadCheck.result.value);
+          console.log(`[wechat-browser] Upload progress: ${status.uploaded}/${targetCount}`);
+          if (status.uploaded >= targetCount) break;
+        }
+      } catch {
+        console.log(`[wechat-browser] Upload check failed, continuing to wait...`);
+      }
     }
 
     console.log('[wechat-browser] Filling title...');
@@ -728,9 +570,7 @@ export async function postToWeChat(options: WeChatBrowserOptions): Promise<void>
       console.log('[wechat-browser] Article composed (preview mode). Add --submit to save as draft.');
     }
   } finally {
-    if (cdp) {
-      cdp.close();
-    }
+    cdp.close();
     console.log('[wechat-browser] Done. Browser window left open.');
   }
 }
