@@ -71,6 +71,41 @@ function getImageExtension(urlOrPath: string): string {
   return match ? match[1]!.toLowerCase() : 'png';
 }
 
+function findVaultRoot(startDir: string): string | null {
+  let dir = path.resolve(startDir);
+  const root = path.parse(dir).root;
+  while (dir !== root) {
+    if (fs.existsSync(path.join(dir, '.obsidian'))) return dir;
+    dir = path.dirname(dir);
+  }
+  return null;
+}
+
+function resolveObsidianImage(wikiLink: string, vaultRoot: string | null): string | null {
+  if (!vaultRoot) {
+    console.error(`[md-to-wechat] No vault root found, cannot resolve ![[${wikiLink}]]`);
+    return null;
+  }
+
+  try {
+    const appJsonPath = path.join(vaultRoot, '.obsidian', 'app.json');
+    if (fs.existsSync(appJsonPath)) {
+      const appJson = JSON.parse(fs.readFileSync(appJsonPath, 'utf-8'));
+      const attachmentFolder = appJson.attachmentFolderPath;
+      if (attachmentFolder) {
+        const candidate = path.join(vaultRoot, attachmentFolder, wikiLink);
+        if (fs.existsSync(candidate)) return candidate;
+      }
+    }
+  } catch {}
+
+  const vaultCandidate = path.join(vaultRoot, wikiLink);
+  if (fs.existsSync(vaultCandidate)) return vaultCandidate;
+
+  console.error(`[md-to-wechat] Could not resolve ![[${wikiLink}]]`);
+  return null;
+}
+
 async function resolveImagePath(imagePath: string, baseDir: string, tempDir: string): Promise<string> {
   if (imagePath.startsWith('http://') || imagePath.startsWith('https://')) {
     const hash = createHash('md5').update(imagePath).digest('hex').slice(0, 8);
@@ -167,13 +202,26 @@ export async function convertMarkdown(markdownPath: string, options?: { title?: 
   const images: Array<{ src: string; placeholder: string }> = [];
   let imageCounter = 0;
 
-  const modifiedBody = bodyWithoutTitle.replace(/!\[([^\]]*)\]\(([^)]+)\)/g, (match, alt, src) => {
+  const vaultRoot = findVaultRoot(baseDir);
+
+  const bodyWithResolvedObsidian = bodyWithoutTitle.replace(/!\[\[([^\]|]+?)(?:\|[^\]]*?)?\]\]/g, (match, wikiLink) => {
+    const resolved = resolveObsidianImage(wikiLink.trim(), vaultRoot);
+    if (!resolved) return match;
+    const placeholder = `WECHATIMGPH_${++imageCounter}`;
+    images.push({ src: resolved, placeholder });
+    return placeholder;
+  });
+
+  const modifiedBody = bodyWithResolvedObsidian.replace(/!\[([^\]]*)\]\(([^)]+)\)/g, (match, alt, src) => {
     const placeholder = `WECHATIMGPH_${++imageCounter}`;
     images.push({ src, placeholder });
     return placeholder;
   });
 
-  const modifiedMarkdown = `---\n${Object.entries(frontmatter).map(([k, v]) => `${k}: ${v}`).join('\n')}\n---\n${modifiedBody}`;
+  const frontmatterEntries = Object.entries(frontmatter);
+  const modifiedMarkdown = frontmatterEntries.length > 0
+    ? `---\n${frontmatterEntries.map(([k, v]) => `${k}: ${v}`).join('\n')}\n---\n${modifiedBody}`
+    : modifiedBody;
 
   const tempDir = fs.mkdtempSync(path.join(os.tmpdir(), 'wechat-article-images-'));
   const tempMdPath = path.join(tempDir, 'temp-article.md');
@@ -185,7 +233,7 @@ export async function convertMarkdown(markdownPath: string, options?: { title?: 
 
   console.error(`[md-to-wechat] Rendering markdown with theme: ${theme}`);
 
-  const result = spawnSync('npx', ['-y', 'bun', renderScript, tempMdPath, '--theme', theme], {
+  const result = spawnSync(process.execPath, [renderScript, tempMdPath, '--theme', theme], {
     stdio: ['inherit', 'pipe', 'pipe'],
     cwd: baseDir,
   });
