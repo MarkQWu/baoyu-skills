@@ -1,4 +1,5 @@
 import fs from 'node:fs';
+import os from 'node:os';
 import path from 'node:path';
 import { spawnSync } from 'node:child_process';
 import process from 'node:process';
@@ -76,12 +77,52 @@ async function clickMenuByText(session: ChromeSession, text: string): Promise<vo
   await session.cdp.send('Input.dispatchMouseEvent', { type: 'mouseReleased', x: pos.x, y: pos.y, button: 'left', clickCount: 1 }, { sessionId: session.sessionId });
 }
 
+const MIN_IMAGE_WIDTH = 1080;
+
+function getImageWidth(imagePath: string): number {
+  const buf = fs.readFileSync(imagePath);
+  if (buf[0] === 0x89 && buf[1] === 0x50) {
+    return buf.readUInt32BE(16);
+  }
+  return 0;
+}
+
+function ensureMinWidth(imagePath: string): string {
+  const width = getImageWidth(imagePath);
+  if (width <= 0 || width >= MIN_IMAGE_WIDTH) return imagePath;
+
+  const tmpDir = path.join(os.tmpdir(), 'wechat-img-resize');
+  if (!fs.existsSync(tmpDir)) fs.mkdirSync(tmpDir, { recursive: true });
+  const outPath = path.join(tmpDir, path.basename(imagePath));
+
+  const ps = `
+Add-Type -AssemblyName System.Drawing
+$img = [System.Drawing.Image]::FromFile('${imagePath.replace(/'/g, "''")}')
+$nw = ${MIN_IMAGE_WIDTH}
+$nh = [int]($img.Height * ($nw / $img.Width))
+$bmp = New-Object System.Drawing.Bitmap($nw, $nh)
+$g = [System.Drawing.Graphics]::FromImage($bmp)
+$g.InterpolationMode = [System.Drawing.Drawing2D.InterpolationMode]::HighQualityBicubic
+$g.DrawImage($img, 0, 0, $nw, $nh)
+$bmp.Save('${outPath.replace(/'/g, "''")}', [System.Drawing.Imaging.ImageFormat]::Png)
+$img.Dispose(); $bmp.Dispose(); $g.Dispose()
+`;
+  const result = spawnSync('powershell', ['-NoProfile', '-Command', ps], { stdio: 'pipe' });
+  if (result.status !== 0) {
+    console.warn('[wechat] Image resize failed, using original:', result.stderr?.toString());
+    return imagePath;
+  }
+  console.log(`[wechat] Resized image ${width}px -> ${MIN_IMAGE_WIDTH}px: ${path.basename(imagePath)}`);
+  return outPath;
+}
+
 async function copyImageToClipboard(imagePath: string): Promise<void> {
+  const effectivePath = ensureMinWidth(imagePath);
   const __filename = fileURLToPath(import.meta.url);
   const __dirname = path.dirname(__filename);
   const copyScript = path.join(__dirname, './copy-to-clipboard.ts');
-  const result = spawnSync(process.execPath, [copyScript, 'image', imagePath], { stdio: 'inherit' });
-  if (result.status !== 0) throw new Error(`Failed to copy image: ${imagePath}`);
+  const result = spawnSync(process.execPath, [copyScript, 'image', effectivePath], { stdio: 'inherit' });
+  if (result.status !== 0) throw new Error(`Failed to copy image: ${effectivePath}`);
 }
 
 async function pasteInEditor(session: ChromeSession): Promise<void> {
@@ -309,10 +350,16 @@ async function selectAndReplacePlaceholder(session: ChromeSession, placeholder: 
   return result.result.value;
 }
 
-async function pressDeleteKey(session: ChromeSession): Promise<void> {
+async function pressBackspaceKey(session: ChromeSession): Promise<void> {
   await session.cdp.send('Input.dispatchKeyEvent', { type: 'keyDown', key: 'Backspace', code: 'Backspace', windowsVirtualKeyCode: 8 }, { sessionId: session.sessionId });
   await sleep(50);
   await session.cdp.send('Input.dispatchKeyEvent', { type: 'keyUp', key: 'Backspace', code: 'Backspace', windowsVirtualKeyCode: 8 }, { sessionId: session.sessionId });
+}
+
+async function pressForwardDeleteKey(session: ChromeSession): Promise<void> {
+  await session.cdp.send('Input.dispatchKeyEvent', { type: 'keyDown', key: 'Delete', code: 'Delete', windowsVirtualKeyCode: 46 }, { sessionId: session.sessionId });
+  await sleep(50);
+  await session.cdp.send('Input.dispatchKeyEvent', { type: 'keyUp', key: 'Delete', code: 'Delete', windowsVirtualKeyCode: 46 }, { sessionId: session.sessionId });
 }
 
 async function removeExtraEmptyLineAfterImage(session: ChromeSession): Promise<boolean> {
@@ -378,6 +425,88 @@ async function removeExtraEmptyLineAfterImage(session: ChromeSession): Promise<b
 
   if (removed) console.log('[wechat] Removed extra empty line after image.');
   return removed;
+}
+
+async function removeEmptyLinesBetweenConsecutiveImages(session: ChromeSession): Promise<number> {
+  let totalRemoved = 0;
+  for (let attempt = 0; attempt < 5; attempt++) {
+    const removed = await evaluate<boolean>(session, `
+      (function() {
+        const editor = document.querySelector('.ProseMirror');
+        if (!editor) return false;
+        const hasImage = (el) => {
+          if (!el) return false;
+          if (el.tagName === 'FIGURE') return true;
+          return !!el.querySelector('img');
+        };
+        const isEmptyBlock = (el) => {
+          if (!el) return false;
+          const text = (el.textContent || '').trim();
+          if (text.length > 0) return false;
+          if (el.querySelector('img, figure, video, iframe')) return false;
+          return true;
+        };
+        const children = Array.from(editor.children);
+        for (let i = 1; i < children.length - 1; i++) {
+          const prev = children[i - 1];
+          const cur = children[i];
+          const next = children[i + 1];
+          if (hasImage(prev) && isEmptyBlock(cur) && hasImage(next)) {
+            // Select the entire empty node and delete via execCommand
+            const range = document.createRange();
+            range.selectNode(cur);
+            const sel = window.getSelection();
+            sel.removeAllRanges();
+            sel.addRange(range);
+            document.execCommand('delete', false);
+            return true;
+          }
+        }
+        return false;
+      })()
+    `);
+
+    if (!removed) break;
+    console.log('[wechat] Removed empty block between consecutive images via execCommand.');
+    await sleep(300);
+    totalRemoved++;
+  }
+
+  if (totalRemoved > 0) console.log(`[wechat] Total: removed ${totalRemoved} empty block(s) between consecutive images.`);
+  return totalRemoved;
+}
+
+async function styleImageContainers(session: ChromeSession): Promise<number> {
+  const count = await evaluate<number>(session, `
+    (function() {
+      const editor = document.querySelector('.ProseMirror');
+      if (!editor) return 0;
+      let styled = 0;
+      const children = Array.from(editor.children);
+      for (const el of children) {
+        const img = el.querySelector('img');
+        if (!img) continue;
+        el.style.background = '#f7f7f7';
+        el.style.borderRadius = '8px';
+        el.style.padding = '4px';
+        el.style.overflow = 'hidden';
+        el.style.marginTop = '10px';
+        el.style.marginBottom = '10px';
+        el.style.width = '100%';
+        el.style.boxSizing = 'border-box';
+        el.style.textAlign = 'center';
+        const imgs = el.querySelectorAll('img');
+        imgs.forEach(function(im) {
+          im.setAttribute('data-w', '10000');
+          im.style.borderRadius = '6px';
+        });
+        styled++;
+      }
+      return styled;
+    })()
+  `);
+  if (count > 0) console.log('[wechat] Styled ' + count + ' image container(s) with background + border-radius.');
+  return count;
 }
 
 export async function postArticle(options: ArticleOptions): Promise<void> {
@@ -613,7 +742,7 @@ export async function postArticle(options: ArticleOptions): Promise<void> {
           await sleep(300);
 
           console.log('[wechat] Deleting placeholder with Backspace...');
-          await pressDeleteKey(session);
+          await pressBackspaceKey(session);
           await sleep(200);
 
           console.log('[wechat] Pasting image...');
@@ -622,6 +751,8 @@ export async function postArticle(options: ArticleOptions): Promise<void> {
           await removeExtraEmptyLineAfterImage(session);
         }
         console.log('[wechat] All images inserted.');
+        await removeEmptyLinesBetweenConsecutiveImages(session);
+        await styleImageContainers(session);
       }
     } else if (content) {
       for (const img of images) {

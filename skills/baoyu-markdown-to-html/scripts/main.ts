@@ -286,7 +286,7 @@ export async function convertMarkdown(markdownPath: string, options?: { title?: 
 
   let htmlContent = fs.readFileSync(finalHtmlPath, 'utf-8');
   for (const img of contentImages) {
-    const imgTag = `<img src="${img.placeholder}" data-local-path="${img.localPath}" style="display: block; width: 100%; margin: 0.5em auto;">`;
+    const imgTag = `<img src="${img.placeholder}" data-local-path="${img.localPath}" style="display: block; width: 100%; margin: 0.5em auto; border-radius: 6px;">`;
     htmlContent = htmlContent.replace(img.placeholder, imgTag);
   }
   fs.writeFileSync(finalHtmlPath, htmlContent, 'utf-8');
