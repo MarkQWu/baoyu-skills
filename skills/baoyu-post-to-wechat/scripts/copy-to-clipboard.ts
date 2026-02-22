@@ -230,11 +230,11 @@ async function copyHtmlLinux(htmlFilePath: string): Promise<void> {
 async function copyImageWindows(imagePath: string): Promise<void> {
   const escaped = imagePath.replace(/'/g, "''");
   const ps = [
-    'Add-Type -AssemblyName System.Windows.Forms',
-    'Add-Type -AssemblyName System.Drawing',
-    `$img = [System.Drawing.Image]::FromFile('${escaped}')`,
-    '[System.Windows.Forms.Clipboard]::SetImage($img)',
-    '$img.Dispose()',
+    'Add-Type -AssemblyName PresentationCore',
+    `$stream = [System.IO.File]::OpenRead('${escaped}')`,
+    '$decoder = [System.Windows.Media.Imaging.BitmapDecoder]::Create($stream, [System.Windows.Media.Imaging.BitmapCreateOptions]::None, [System.Windows.Media.Imaging.BitmapCacheOption]::OnLoad)',
+    '[System.Windows.Clipboard]::SetImage($decoder.Frames[0])',
+    '$stream.Close()',
   ].join('; ');
   await runCommand('powershell.exe', ['-NoProfile', '-Sta', '-Command', ps]);
 }

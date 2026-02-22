@@ -2,7 +2,7 @@ import fs from 'node:fs';
 import path from 'node:path';
 import { spawnSync } from 'node:child_process';
 import process from 'node:process';
-import { fileURLToPath } from 'node:url';
+import { fileURLToPath, pathToFileURL } from 'node:url';
 import { launchChrome, tryConnectExisting, findExistingChromeDebugPort, getPageSession, waitForNewTab, clickElement, typeText, evaluate, sleep, type ChromeSession, type CdpConnection } from './cdp.ts';
 
 const WECHAT_URL = 'https://mp.weixin.qq.com/';
@@ -80,7 +80,7 @@ async function copyImageToClipboard(imagePath: string): Promise<void> {
   const __filename = fileURLToPath(import.meta.url);
   const __dirname = path.dirname(__filename);
   const copyScript = path.join(__dirname, './copy-to-clipboard.ts');
-  const result = spawnSync('npx', ['-y', 'bun', copyScript, 'image', imagePath], { stdio: 'inherit' });
+  const result = spawnSync(process.execPath, [copyScript, 'image', imagePath], { stdio: 'inherit' });
   if (result.status !== 0) throw new Error(`Failed to copy image: ${imagePath}`);
 }
 
@@ -117,7 +117,7 @@ async function sendPaste(cdp?: CdpConnection, sessionId?: string): Promise<void>
 
 async function copyHtmlFromBrowser(cdp: CdpConnection, htmlFilePath: string, contentImages: ImageInfo[] = []): Promise<void> {
   const absolutePath = path.isAbsolute(htmlFilePath) ? htmlFilePath : path.resolve(process.cwd(), htmlFilePath);
-  const fileUrl = `file://${absolutePath}`;
+  const fileUrl = pathToFileURL(absolutePath).href;
 
   console.log(`[wechat] Opening HTML file in new tab: ${fileUrl}`);
 
@@ -185,10 +185,10 @@ async function parseMarkdownWithPlaceholders(markdownPath: string, theme?: strin
   const __filename = fileURLToPath(import.meta.url);
   const __dirname = path.dirname(__filename);
   const mdToWechatScript = path.join(__dirname, 'md-to-wechat.ts');
-  const args = ['-y', 'bun', mdToWechatScript, markdownPath];
+  const args = [mdToWechatScript, markdownPath];
   if (theme) args.push('--theme', theme);
 
-  const result = spawnSync('npx', args, { stdio: ['inherit', 'pipe', 'pipe'] });
+  const result = spawnSync(process.execPath, args, { stdio: ['inherit', 'pipe', 'pipe'] });
   if (result.status !== 0) {
     const stderr = result.stderr?.toString() || '';
     throw new Error(`Failed to parse markdown: ${stderr}`);
@@ -422,20 +422,14 @@ export async function postArticle(options: ArticleOptions): Promise<void> {
   let cdp: CdpConnection;
   let chrome: ReturnType<typeof import('node:child_process').spawn> | null = null;
 
-  // Try connecting to existing Chrome: explicit port > auto-detect > launch new
-  const portToTry = cdpPort ?? await findExistingChromeDebugPort();
-  if (portToTry) {
-    const existing = await tryConnectExisting(portToTry);
-    if (existing) {
-      console.log(`[cdp] Connected to existing Chrome on port ${portToTry}`);
-      cdp = existing;
-    } else {
-      console.log(`[cdp] Port ${portToTry} not available, launching new Chrome...`);
-      const launched = await launchChrome(WECHAT_URL, profileDir);
-      cdp = launched.cdp;
-      chrome = launched.chrome;
-    }
+  // Try connecting to existing Chrome on fixed port 9222, otherwise launch new
+  const portToTry = cdpPort ?? 9222;
+  const existing = await tryConnectExisting(portToTry);
+  if (existing) {
+    console.log(`[cdp] Connected to existing Chrome on port ${portToTry}`);
+    cdp = existing;
   } else {
+    console.log(`[cdp] Port ${portToTry} not available, launching new Chrome...`);
     const launched = await launchChrome(WECHAT_URL, profileDir);
     cdp = launched.cdp;
     chrome = launched.chrome;
@@ -511,22 +505,62 @@ export async function postArticle(options: ArticleOptions): Promise<void> {
 
     if (effectiveTitle) {
       console.log('[wechat] Filling title...');
-      await evaluate(session, `document.querySelector('#title').value = ${JSON.stringify(effectiveTitle)}; document.querySelector('#title').dispatchEvent(new Event('input', { bubbles: true }));`);
+      await waitForElement(session, '#title', 10_000);
+      const titleSet = await evaluate<boolean>(session, `
+        (function() {
+          const el = document.querySelector('#title');
+          if (!el) return false;
+          const proto = el instanceof HTMLTextAreaElement ? HTMLTextAreaElement.prototype : HTMLInputElement.prototype;
+          const setter = Object.getOwnPropertyDescriptor(proto, 'value').set;
+          setter.call(el, ${JSON.stringify(effectiveTitle)});
+          el.dispatchEvent(new Event('input', { bubbles: true }));
+          el.dispatchEvent(new Event('change', { bubbles: true }));
+          return true;
+        })()
+      `);
+      console.log(`[wechat] Title setter result: ${titleSet}`);
+      await sleep(500);
     }
 
     if (effectiveAuthor) {
       console.log('[wechat] Filling author...');
-      await evaluate(session, `document.querySelector('#author').value = ${JSON.stringify(effectiveAuthor)}; document.querySelector('#author').dispatchEvent(new Event('input', { bubbles: true }));`);
+      await waitForElement(session, '#author', 10_000);
+      await evaluate(session, `
+        (function() {
+          const el = document.querySelector('#author');
+          if (!el) return;
+          const proto = el instanceof HTMLTextAreaElement ? HTMLTextAreaElement.prototype : HTMLInputElement.prototype;
+          const setter = Object.getOwnPropertyDescriptor(proto, 'value').set;
+          setter.call(el, ${JSON.stringify(effectiveAuthor)});
+          el.dispatchEvent(new Event('input', { bubbles: true }));
+          el.dispatchEvent(new Event('change', { bubbles: true }));
+        })()
+      `);
+      await sleep(500);
     }
-
-    await sleep(500);
 
     if (effectiveTitle) {
       const actualTitle = await evaluate<string>(session, `document.querySelector('#title')?.value || ''`);
       if (actualTitle === effectiveTitle) {
         console.log('[wechat] Title verified OK.');
       } else {
-        console.warn(`[wechat] Title verification failed. Expected: "${effectiveTitle}", got: "${actualTitle}"`);
+        console.log(`[wechat] Title verification: got "${actualTitle}". Trying fallback...`);
+        await clickElement(session, '#title');
+        await sleep(300);
+        const modifiers = process.platform === 'darwin' ? 4 : 2;
+        await session.cdp.send('Input.dispatchKeyEvent', { type: 'keyDown', key: 'a', code: 'KeyA', modifiers, windowsVirtualKeyCode: 65 }, { sessionId: session.sessionId });
+        await session.cdp.send('Input.dispatchKeyEvent', { type: 'keyUp', key: 'a', code: 'KeyA', modifiers, windowsVirtualKeyCode: 65 }, { sessionId: session.sessionId });
+        await sleep(100);
+        await session.cdp.send('Input.dispatchKeyEvent', { type: 'keyDown', key: 'Backspace', code: 'Backspace', windowsVirtualKeyCode: 8 }, { sessionId: session.sessionId });
+        await session.cdp.send('Input.dispatchKeyEvent', { type: 'keyUp', key: 'Backspace', code: 'Backspace', windowsVirtualKeyCode: 8 }, { sessionId: session.sessionId });
+        await sleep(100);
+        for (const char of effectiveTitle) {
+          await session.cdp.send('Input.dispatchKeyEvent', { type: 'keyDown', key: char, text: char }, { sessionId: session.sessionId });
+          await session.cdp.send('Input.dispatchKeyEvent', { type: 'keyUp', key: char }, { sessionId: session.sessionId });
+        }
+        await sleep(500);
+        const retryTitle = await evaluate<string>(session, `document.querySelector('#title')?.value || ''`);
+        console.log(`[wechat] Title after fallback: "${retryTitle}"`);
       }
     }
 

@@ -177,7 +177,7 @@ async function checkPasteKeystroke(): Promise<void> {
 }
 
 async function checkBun(): Promise<void> {
-  const result = spawnSync('npx', ['-y', 'bun', '--version'], { stdio: 'pipe', timeout: 30_000 });
+  const result = spawnSync(process.execPath, ['--version'], { stdio: 'pipe', timeout: 30_000 });
   if (result.status === 0) {
     log('Bun runtime', true, `v${result.stdout?.toString().trim()}`);
   } else {

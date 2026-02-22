@@ -47,6 +47,7 @@ export function findChromeExecutable(): string | undefined {
       candidates.push(
         'C:\\Program Files\\Google\\Chrome\\Application\\chrome.exe',
         'C:\\Program Files (x86)\\Google\\Chrome\\Application\\chrome.exe',
+        path.join(process.env.LOCALAPPDATA || '', 'Google', 'Chrome', 'Application', 'chrome.exe'),
       );
       break;
     default:
@@ -61,6 +62,10 @@ export function findChromeExecutable(): string | undefined {
 }
 
 export function getDefaultProfileDir(): string {
+  if (process.platform === 'win32') {
+    const base = process.env.LOCALAPPDATA || path.join(os.homedir(), 'AppData', 'Local');
+    return path.join(base, 'wechat-browser-profile');
+  }
   const base = process.env.XDG_DATA_HOME || path.join(os.homedir(), '.local', 'share');
   return path.join(base, 'wechat-browser-profile');
 }
@@ -209,8 +214,8 @@ export async function launchChrome(url: string, profileDir?: string): Promise<{ 
   const profile = profileDir ?? getDefaultProfileDir();
   await mkdir(profile, { recursive: true });
 
-  const port = await getFreePort();
-  console.log(`[cdp] Launching Chrome (profile: ${profile})`);
+  const port = 9222;
+  console.log(`[cdp] Launching Chrome on port ${port} (profile: ${profile})`);
 
   const chrome = spawn(chromePath, [
     `--remote-debugging-port=${port}`,
@@ -220,7 +225,8 @@ export async function launchChrome(url: string, profileDir?: string): Promise<{ 
     '--disable-blink-features=AutomationControlled',
     '--start-maximized',
     url,
-  ], { stdio: 'ignore' });
+  ], { stdio: 'ignore', detached: true });
+  chrome.unref();
 
   const wsUrl = await waitForChromeDebugPort(port, 30_000);
   const cdp = await CdpConnection.connect(wsUrl, 30_000);
