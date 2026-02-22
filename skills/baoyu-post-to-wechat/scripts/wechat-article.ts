@@ -479,33 +479,41 @@ async function removeEmptyLinesBetweenConsecutiveImages(session: ChromeSession):
 async function styleImageContainers(session: ChromeSession): Promise<number> {
   const count = await evaluate<number>(session, `
     (function() {
-      const editor = document.querySelector('.ProseMirror');
+      var editor = document.querySelector('.ProseMirror');
       if (!editor) return 0;
-      let styled = 0;
-      const children = Array.from(editor.children);
-      for (const el of children) {
-        const img = el.querySelector('img');
+      var desc = editor.pmViewDesc;
+      if (!desc) return 0;
+      var children = desc.children;
+      var extraStyles = 'background: #f7f7f7; border-radius: 8px; padding: 4px; overflow: hidden;';
+      var styled = 0;
+
+      for (var i = 0; i < children.length; i++) {
+        var child = children[i];
+        if (!child.node) continue;
+        var typeName = child.node.type.name;
+        if (typeName !== 'nodeleaf' && typeName !== 'para') continue;
+        var domEl = child.dom;
+        if (!domEl || !domEl.querySelector) continue;
+        var img = domEl.querySelector('img');
         if (!img) continue;
-        el.style.background = '#f7f7f7';
-        el.style.borderRadius = '8px';
-        el.style.padding = '4px';
-        el.style.overflow = 'hidden';
-        el.style.marginTop = '10px';
-        el.style.marginBottom = '10px';
-        el.style.width = '100%';
-        el.style.boxSizing = 'border-box';
-        el.style.textAlign = 'center';
-        const imgs = el.querySelectorAll('img');
-        imgs.forEach(function(im) {
-          im.setAttribute('data-w', '10000');
-          im.style.borderRadius = '6px';
-        });
+
+        var oldStyle = child.node.attrs.attributes.style || '';
+        var cleanStyle = oldStyle.replace(/background[^;]*;?/g, '').replace(/border-radius[^;]*;?/g, '').replace(/padding[^;]*;?/g, '').replace(/overflow[^;]*;?/g, '');
+        var newStyle = cleanStyle + extraStyles;
+
+        if (typeName === 'nodeleaf') {
+          newStyle = 'text-align: center; ' + extraStyles + ' margin: 10px 0;';
+        }
+
+        child.node.attrs.attributes.style = newStyle;
+        domEl.setAttribute('style', newStyle);
         styled++;
       }
+
       return styled;
     })()
   `);
-  if (count > 0) console.log('[wechat] Styled ' + count + ' image container(s) with background + border-radius.');
+  if (count > 0) console.log('[wechat] Styled ' + count + ' image container(s) via ProseMirror dual mutation.');
   return count;
 }
 
