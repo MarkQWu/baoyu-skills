@@ -112,7 +112,7 @@ async function postToWeChat(options: WeChatOptions): Promise<void> {
 
   if (title.length > 20) throw new Error(`Title too long: ${title.length} chars (max 20)`);
   if (content.length > 1000) throw new Error(`Content too long: ${content.length} chars (max 1000)`);
-  if (images.length === 0) throw new Error('At least one image is required');
+  if (images.length === 0) console.log('[wechat] No images provided — posting text only');
 
   const absoluteImages = images.map(p => path.isAbsolute(p) ? p : path.resolve(process.cwd(), p));
   for (const img of absoluteImages) {
@@ -196,6 +196,7 @@ async function postToWeChat(options: WeChatOptions): Promise<void> {
   snapshot = ab(['snapshot']);
   console.log(snapshot.substring(0, 2000));
 
+  if (absoluteImages.length > 0) {
   console.log('[wechat] Uploading images...');
   const fileInputSelector = '.js_upload_btn_container input[type=file]';
   const fileInputSelectorJs = toSafeJsStringLiteral(fileInputSelector);
@@ -233,6 +234,9 @@ async function postToWeChat(options: WeChatOptions): Promise<void> {
 
   console.log('[wechat] Waiting for uploads to complete...');
   await sleep(10000);
+  } else {
+    console.log('[wechat] No images — skipping upload step');
+  }
 
   console.log('[wechat] Filling title...');
   snapshot = ab(['snapshot', '-i']);
@@ -350,8 +354,7 @@ async function main(): Promise<void> {
     process.exit(1);
   }
   if (images.length === 0) {
-    console.error('Error: At least one --image is required');
-    process.exit(1);
+    console.log('[wechat] No images provided — will post text only');
   }
 
   await postToWeChat({ title, content, images, submit, keepOpen });

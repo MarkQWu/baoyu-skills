@@ -160,7 +160,7 @@ export async function postToWeChat(options: WeChatBrowserOptions): Promise<void>
 
   if (!title) throw new Error('Title is required (use --title or --markdown)');
   if (!content) throw new Error('Content is required (use --content or --markdown)');
-  if (images.length === 0) throw new Error('At least one image is required (use --image or --images)');
+  if (images.length === 0) console.log('[wechat-browser] No images provided — posting text only');
 
   for (const img of images) {
     if (!fs.existsSync(img)) throw new Error(`Image not found: ${img}`);
@@ -354,6 +354,7 @@ export async function postToWeChat(options: WeChatBrowserOptions): Promise<void>
 
     await sleep(2000);
 
+    if (images.length > 0) {
     console.log('[wechat-browser] Uploading all images at once...');
     const absolutePaths = images.map(p => path.isAbsolute(p) ? p : path.resolve(process.cwd(), p));
     console.log(`[wechat-browser] Images: ${absolutePaths.join(', ')}`);
@@ -496,6 +497,9 @@ export async function postToWeChat(options: WeChatBrowserOptions): Promise<void>
       const status = JSON.parse(uploadCheck.result.value);
       console.log(`[wechat-browser] Upload progress: ${status.uploaded}/${targetCount} (loading: ${status.loading})`);
       if (status.uploaded >= targetCount) break;
+    }
+    } else {
+      console.log('[wechat-browser] No images — skipping upload step');
     }
 
     console.log('[wechat-browser] Filling title...');
@@ -728,8 +732,7 @@ async function main(): Promise<void> {
     process.exit(1);
   }
   if (images.length === 0 && !imagesDir) {
-    console.error('Error: --image or --images is required');
-    process.exit(1);
+    console.log('[wechat-browser] No images provided — will post text only');
   }
 
   await postToWeChat({ title, content, images: images.length > 0 ? images : undefined, imagesDir, markdownFile, submit, profileDir });
