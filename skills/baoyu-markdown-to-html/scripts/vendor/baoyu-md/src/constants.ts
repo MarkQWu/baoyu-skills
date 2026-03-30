@@ -73,6 +73,15 @@ export const THEME_STYLE_DEFAULTS: Record<string, Partial<StyleConfig>> = {
     fontSize: "15px",
     blockquoteBackground: "rgba(255, 255, 255, 0.6)",
   },
+  ink: {
+    primaryColor: "#8B4513",
+    accentColor: "#B0A89A",
+    containerBg: "transparent",
+    fontFamily: `Optima-Regular, Optima, PingFangSC-light, PingFangTC-light, 'PingFang SC', Cambria, Cochin, Georgia, Times, 'Times New Roman', serif`,
+    fontSize: "16px",
+    foreground: "0 0% 17%",
+    blockquoteBackground: "#F5F0E8",
+  },
 };
 
 export const macCodeSvg = `
