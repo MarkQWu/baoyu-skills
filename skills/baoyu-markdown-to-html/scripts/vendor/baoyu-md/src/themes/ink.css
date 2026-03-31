@@ -22,18 +22,13 @@ container {
 
 /* ==================== 一级标题 ==================== */
 h1 {
-  display: table;
-  padding: 0.3em 0.8em;
-  margin: 2em auto 1.5em;
-  color: #fff;
-  background: linear-gradient(135deg, #2c2c2c, #5a5a5a);
-  border: none;
-  border-radius: 6px;
-  box-shadow: 0 4px 12px rgba(0, 0, 0, 0.15);
-  font-size: calc(var(--md-font-size) * 1.6);
+  margin: 1.5em 0 1em;
+  padding: 0.3em 0;
+  font-size: 24px;
   font-weight: 800;
+  color: #1a1a1a;
   text-align: center;
-  line-height: 1.3;
+  line-height: 1.4;
 }
 
 /* ==================== 二级标题 ==================== */
@@ -116,11 +111,11 @@ pre.code__pre,
 .hljs.code__pre {
   font-size: 90%;
   overflow-x: auto;
-  border-radius: 6px;
+  border-radius: 8px;
   padding: 0 !important;
   line-height: 1.5;
   margin: 10px 8px;
-  box-shadow: inset 0 0 10px rgba(0, 0, 0, 0.05);
+  background: #f6f8fa;
 }
 
 /* ==================== 图片 ==================== */
@@ -218,7 +213,6 @@ strong {
   color: #1a1a1a;
   font-weight: 700;
   font-size: inherit;
-  padding: 0 2px;
 }
 
 /* ==================== 表格 ==================== */
