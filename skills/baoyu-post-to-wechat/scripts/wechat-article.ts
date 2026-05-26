@@ -335,7 +335,8 @@ async function selectAndReplacePlaceholder(session: ChromeSession, placeholder: 
   const result = await session.cdp.send<{ result: { value: boolean } }>('Runtime.evaluate', {
     expression: `
       (function() {
-        const editor = document.querySelector('.ProseMirror');
+        const editors = document.querySelectorAll('.ProseMirror');
+        const editor = editors[1] || editors[0];
         if (!editor) return false;
 
         const placeholder = ${JSON.stringify(placeholder)};
@@ -383,7 +384,8 @@ async function pressDeleteKey(session: ChromeSession): Promise<void> {
 async function removeExtraEmptyLineAfterImage(session: ChromeSession): Promise<boolean> {
   const removed = await evaluate<boolean>(session, `
     (function() {
-      const editor = document.querySelector('.ProseMirror');
+      const editors = document.querySelectorAll('.ProseMirror');
+      const editor = editors[1] || editors[0];
       if (!editor) return false;
 
       const sel = window.getSelection();
@@ -530,7 +532,7 @@ export async function postArticle(options: ArticleOptions): Promise<void> {
         if (!currentUrl.includes('/cgi-bin/home')) {
           console.log('[wechat] Navigating to home...');
           await evaluate(session, `window.location.href = '${WECHAT_URL}cgi-bin/home?t=home/index'`);
-          await sleep(5000);
+          await sleep(10000);
         }
       } else {
         // No WeChat tab found, create one
@@ -696,7 +698,8 @@ export async function postArticle(options: ArticleOptions): Promise<void> {
 
       const editorHasContent = await evaluate<boolean>(session, `
         (function() {
-          const editor = document.querySelector('.ProseMirror');
+          const editors = document.querySelectorAll('.ProseMirror');
+          const editor = editors[1] || editors[0];
           if (!editor) return false;
           const text = editor.innerText?.trim() || '';
           return text.length > 0;
