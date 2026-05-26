@@ -620,7 +620,8 @@ export async function postArticle(options: ArticleOptions): Promise<void> {
           const pm = document.querySelectorAll('.ProseMirror')[1] || document.querySelectorAll('.ProseMirror')[0];
           if (!pm) return false;
           pm.focus();
-          const html = atob('${htmlB64}');
+          const bytes = Uint8Array.from(atob('${htmlB64}'), c => c.charCodeAt(0));
+          const html = new TextDecoder('utf-8').decode(bytes);
           const dt = new DataTransfer();
           dt.setData('text/html', html);
           dt.setData('text/plain', html.replace(/<[^>]+>/g, ' ').replace(/\s+/g, ' ').trim());
@@ -632,7 +633,8 @@ export async function postArticle(options: ArticleOptions): Promise<void> {
 
       const editorHasContent = await evaluate<boolean>(session, `
         (function() {
-          const editor = document.querySelector('.ProseMirror');
+          const editors = document.querySelectorAll('.ProseMirror');
+          const editor = editors[1] || editors[0];
           if (!editor) return false;
           const text = editor.innerText?.trim() || '';
           return text.length > 0;
