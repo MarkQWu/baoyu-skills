@@ -128,7 +128,7 @@ async function sendPaste(cdp?: CdpConnection, sessionId?: string): Promise<void>
   }
 }
 
-async function copyHtmlFromBrowser(cdp: CdpConnection, htmlFilePath: string, contentImages: ImageInfo[] = []): Promise<void> {
+async function copyHtmlFromBrowser(cdp: CdpConnection, htmlFilePath: string, contentImages: ImageInfo[] = []): Promise<string> {
   const absolutePath = path.isAbsolute(htmlFilePath) ? htmlFilePath : path.resolve(process.cwd(), htmlFilePath);
   const fileUrl = `file://${absolutePath}`;
 
@@ -163,29 +163,16 @@ async function copyHtmlFromBrowser(cdp: CdpConnection, htmlFilePath: string, con
     await sleep(500);
   }
 
-  console.log('[wechat] Selecting #output content...');
-  await cdp.send<{ result: { value: unknown } }>('Runtime.evaluate', {
-    expression: `
-      (function() {
-        const output = document.querySelector('#output') || document.body;
-        const range = document.createRange();
-        range.selectNodeContents(output);
-        const selection = window.getSelection();
-        selection.removeAllRanges();
-        selection.addRange(range);
-        return true;
-      })()
-    `,
+  console.log('[wechat] Extracting content HTML...');
+  const htmlResult = await cdp.send<{ result: { value: string } }>('Runtime.evaluate', {
+    expression: `(document.querySelector('#output') || document.body).innerHTML`,
     returnByValue: true,
   }, { sessionId });
-  await sleep(300);
-
-  console.log('[wechat] Copying content...');
-  await sendCopy(cdp, sessionId);
-  await sleep(1000);
+  const htmlContent = htmlResult.result.value || '';
 
   console.log('[wechat] Closing HTML tab...');
   await cdp.send('Target.closeTarget', { targetId });
+  return htmlContent;
 }
 
 async function pasteFromClipboardInEditor(session: ChromeSession): Promise<void> {
@@ -623,11 +610,24 @@ export async function postArticle(options: ArticleOptions): Promise<void> {
 
     if (effectiveHtmlFile && fs.existsSync(effectiveHtmlFile)) {
       console.log(`[wechat] Copying HTML content from: ${effectiveHtmlFile}`);
-      await copyHtmlFromBrowser(cdp, effectiveHtmlFile, contentImages);
+      const htmlContent = await copyHtmlFromBrowser(cdp, effectiveHtmlFile, contentImages);
       await sleep(500);
       await prepareEditorPasteTarget(session, 'body content paste', { clickEditor: true });
-      console.log('[wechat] Pasting into editor...');
-      await pasteFromClipboardInEditor(session);
+      console.log('[wechat] Injecting HTML content via ClipboardEvent...');
+      const htmlB64 = Buffer.from(htmlContent).toString('base64');
+      await evaluate(session, `
+        (function() {
+          const pm = document.querySelectorAll('.ProseMirror')[1] || document.querySelectorAll('.ProseMirror')[0];
+          if (!pm) return false;
+          pm.focus();
+          const html = atob('${htmlB64}');
+          const dt = new DataTransfer();
+          dt.setData('text/html', html);
+          dt.setData('text/plain', html.replace(/<[^>]+>/g, ' ').replace(/\s+/g, ' ').trim());
+          pm.dispatchEvent(new ClipboardEvent('paste', { bubbles: true, cancelable: true, clipboardData: dt }));
+          return true;
+        })()
+      `);
       await sleep(3000);
 
       const editorHasContent = await evaluate<boolean>(session, `
