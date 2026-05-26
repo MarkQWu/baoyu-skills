@@ -203,13 +203,23 @@ async function prepareEditorPasteTarget(
   await sleep(100);
 
   if (options.clickEditor) {
-    await clickElement(session, '.ProseMirror');
+    await evaluate(session, `
+      (function() {
+        const editors = document.querySelectorAll('.ProseMirror');
+        const bodyEditor = editors[1] || editors[0];
+        if (!bodyEditor) return;
+        bodyEditor.scrollIntoView({ block: 'center' });
+        bodyEditor.focus();
+        bodyEditor.click();
+      })()
+    `);
     await sleep(200);
   }
 
   const ready = await evaluate<boolean>(session, `
     (function() {
-      const editor = document.querySelector('.ProseMirror');
+      const editors = document.querySelectorAll('.ProseMirror');
+      const editor = editors[1] || editors[0];
       if (!editor) return false;
 
       const active = document.activeElement;
